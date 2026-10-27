@@ -1,0 +1,88 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+my $R  = '[REDACTED]';
+my $kw = qr/(?:secret|key|token|passw(?:or)?d|pass(?:phrase)?|pwd|auth|credential|private|api|salt|cookie|session|signature|dsn|webhook|bearer|cert|access|_id\b|chatid)/i;
+my $nm = qr/[A-Za-z0-9_.\-]*$kw[A-Za-z0-9_.\-]*/;
+my $lhs = qr/(?:^|[\s{,;(\$])(?:export\s+)?["']?$nm["']?[ \t]*/;
+my $pb = qr/-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/;
+my $pe = qr/-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/;
+my $in = 0;
+my $rc = 0;
+my $color = (-t STDOUT && !exists $ENV{NO_COLOR}) ? 1 : 0;
+my @files;
+for my $a (@ARGV) {
+    if    ($a eq '-C' || $a eq '--color')    { $color = 1; }
+    elsif ($a eq '-N' || $a eq '--no-color') { $color = 0; }
+    else  { push @files, $a; }
+}
+@files = ('-') unless @files;
+my %c = $color
+    ? (key => "\e[36m", val => "\e[32m", red => "\e[1;31m", dim => "\e[2m", sec => "\e[1;33m", hdr => "\e[1;35m", rst => "\e[0m")
+    : (key => '', val => '', red => '', dim => '', sec => '', hdr => '', rst => '');
+sub redact {
+    my ($l) = @_;
+    if ($in) {
+        if ($l =~ /^(.*?)($pe)(.*)$/s) {
+            my ($pre, $end, $post) = ($1, $2, $3);
+            my $o = $in == 1 ? "$R\n" : '';
+            $in = 0;
+            return $o . $end . redact_line($post);
+        }
+        my $o = $in == 1 ? "$R\n" : '';
+        $in = 2;
+        return $o;
+    }
+    if ($l =~ /^(.*?)($pb)(.*)$/s) {
+        my ($pre, $beg, $rest) = ($1, $2, $3);
+        if ($rest =~ /^(.*?)($pe)(.*)$/s) {
+            return redact_line($pre) . $beg . $R . $2 . redact_line($3);
+        }
+        $in = 1;
+        return redact_line($pre) . $beg . "\n";
+    }
+    return redact_line($l);
+}
+sub redact_line {
+    my ($l) = @_;
+    $l =~ s/($lhs(?:=>|:=|=|:|,)[ \t]*)(["'`])(?!\2)(?!\Q$R\E\2)[^"'`]*\2/$1$2$R$2/g;
+    $l =~ s/($lhs(?:=>|:=|=(?!>)|:)[ \t]*)(?![\$\[\{"'`]|\Q$R\E|(?:Bearer|Basic|Token)\s)[^\s"'`,;()\[\]{}#]++(?![(\[])/$1$R/g;
+    $l =~ s{(\b[a-z][a-z0-9+.\-]*://[^:/\s@]+:)[^@\s/]+@}{$1$R\@}gi;
+    $l =~ s/\b((?:Bearer|Basic|Token)\s+)[A-Za-z0-9._~+\/=\-]{8,}/$1$R/g;
+    $l =~ s/\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{10,}\b/$R/g;
+    $l =~ s/\bsk-[A-Za-z0-9_\-]{20,}/$R/g;
+    $l =~ s/\bgh[pousr]_[A-Za-z0-9]{30,}\b/$R/g;
+    $l =~ s/\bxox[abprs]-[A-Za-z0-9\-]{10,}/$R/g;
+    $l =~ s/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/$R/g;
+    $l =~ s/\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+/$R/g;
+    $l =~ s/\b\d{8,10}:[A-Za-z0-9_\-]{35}\b/$R/g;
+    $l =~ s/(["'])(?=[^"']*\d)(?=[^"']*[A-Za-z])[A-Za-z0-9_\-+\/=]{20,}\1(?!\s*:)/$1$R$1/g;
+    $l =~ s/\b[a-f0-9]{32,}\b/$R/gi;
+    return $l;
+}
+sub paint {
+    my ($l) = @_;
+    return $l unless $color;
+    my $nl = $l =~ s/\n\z// ? "\n" : '';
+    if ($l eq $R) { return "$c{red}$l$c{rst}$nl"; }
+    if ($l =~ /^\s*(?:#|;|\/\/)/) { return "$c{dim}$l$c{rst}$nl"; }
+    if ($l =~ /^\s*\[[^\]]+\]\s*$/) { return "$c{sec}$l$c{rst}$nl"; }
+    if ($l =~ /^(\s*(?:export\s+)?)(["']?\$?[A-Za-z_][\w.\-]*["']?)(\s*(?:=>|:=|=|:)\s*)(.*)$/) {
+        my ($ind, $k, $sep, $v) = ($1, $2, $3, $4);
+        $v = "$c{val}$v$c{rst}";
+        $v =~ s/\Q$R\E/$c{red}$R$c{rst}$c{val}/g;
+        return "$ind$c{key}$k$c{rst}$sep$v$nl";
+    }
+    $l =~ s/\Q$R\E/$c{red}$R$c{rst}/g;
+    return "$l$nl";
+}
+for my $f (@files) {
+    my $fh;
+    if ($f eq '-') { $fh = \*STDIN; }
+    elsif (!open($fh, '<', $f)) { warn "catsafe: $f: $!\n"; $rc = 1; next; }
+    print "$c{hdr}== $f ==$c{rst}\n" if @files > 1;
+    $in = 0;
+    while (my $l = <$fh>) { print paint(redact($l)); }
+    close($fh) unless $f eq '-';
+}
+exit $rc;
